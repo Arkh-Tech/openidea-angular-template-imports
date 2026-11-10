@@ -1,5 +1,6 @@
 # Angular Template Imports — Arkh-Tech
 
+
 # Rust / Cargo
 /target/
 
@@ -8,6 +9,7 @@
 /build/
 /out/
 *.oiplugin
+
 
 # Chaves privadas e credenciais
 .env

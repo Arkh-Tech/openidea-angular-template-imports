@@ -9,7 +9,5 @@ description = "Quick fixes for missing Angular standalone template imports in Op
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Acompanha a API Rust documentada no README do OpenIDEA.
-# Para builds reprodutiveis, substitua branch por rev = "<commit testado>".
-openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", branch = "main" }
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", rev = "b08a9bedf9de8b21101aa566fc6a8e13c71d80fe" }
 serde_json = "1"
