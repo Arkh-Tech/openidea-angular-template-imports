@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "angular-template-imports"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "openidea-plugin",
  "serde_json",
@@ -105,7 +105,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "openidea-plugin"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/openidea?rev=b08a9bedf9de8b21101aa566fc6a8e13c71d80fe#b08a9bedf9de8b21101aa566fc6a8e13c71d80fe"
+source = "git+https://github.com/l0ng-ai/openidea?tag=v0.1.39#25424465c04c9221a92c02227c905911641d29e3"
 dependencies = [
  "serde",
  "serde_json",

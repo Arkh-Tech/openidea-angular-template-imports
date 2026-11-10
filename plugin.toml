@@ -1,6 +1,6 @@
 id = "arkhtech.angular-template-imports"
 name = "Angular Template Imports"
-version = "0.3.3"
+version = "0.3.4"
 
 description = "Smart Angular Quick Fixes and automatic imports for OpenIDEA"
 
