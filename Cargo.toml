@@ -1,0 +1,15 @@
+[package]
+name = "angular-template-imports"
+version = "0.3.3"
+edition = "2024"
+license = "MIT"
+description = "Quick fixes for missing Angular standalone template imports in OpenIDEA"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Acompanha a API Rust documentada no README do OpenIDEA.
+# Para builds reprodutiveis, substitua branch por rev = "<commit testado>".
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", branch = "main" }
+serde_json = "1"

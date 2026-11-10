@@ -1,0 +1,21 @@
+id = "arkhtech.angular-template-imports"
+name = "Angular Template Imports"
+version = "0.3.3"
+
+description = "Smart Angular Quick Fixes and automatic imports for OpenIDEA"
+
+authors = ["Arkh-Tech"]
+homepage = "https://github.com/Arkh-Tech/openidea-angular-template-imports"
+license = "MIT"
+
+categories = ["frameworks", "tools"]
+engines.openidea = "^1.3"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:html"]
+
+[capabilities]
+required = ["project.read"]
+
+[[contributes.providers]]
+kinds = ["code-actions"]
+languages = ["html"]

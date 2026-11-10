@@ -1,0 +1,37 @@
+# Angular Template Imports — Arkh-Tech
+
+# Rust / Cargo
+/target/
+
+# OpenIDEA build e distribuição
+/dist/
+/build/
+/out/
+*.oiplugin
+
+# Chaves privadas e credenciais
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# IDEs e editores
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+*.bak
