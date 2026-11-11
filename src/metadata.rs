@@ -1,6 +1,6 @@
 //! Minimal, conservative reader of Angular's published Ivy .d.ts metadata.
 //! This is not a TypeScript parser. Unsupported declarations/selectors are skipped.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind { Directive, Pipe, Module }
@@ -108,7 +108,7 @@ pub fn declarations(text: &str) -> Vec<Decl> {
 pub struct Export {
     pub path: Option<String>,
     /// Symbol inside target -> public alias inside this file.
-    pub symbols: BTreeMap<String, String>,
+    pub symbols: BTreeMap<String, BTreeSet<String>>,
     pub star: bool,
 }
 
@@ -132,7 +132,8 @@ pub fn exports(text: &str) -> Vec<Export> {
                 let tokens: Vec<_> = spec.split_whitespace().collect();
                 if tokens.is_empty() { continue; }
                 let alias = if tokens.len() >= 3 && tokens[1] == "as" { tokens[2] } else { tokens[0] };
-                symbols.insert(tokens[0].to_owned(), alias.to_owned());
+                symbols.entry(tokens[0].to_owned())
+                    .or_insert_with(BTreeSet::new).insert(alias.to_owned());
             }
             let rest = tail[end_rel+1..].trim_start();
             let path = rest.strip_prefix("from").and_then(|s| quoted(s));
@@ -223,9 +224,21 @@ mod tests {
     #[test]
     fn parses_reexports() {
         let out = exports("export { RouterLink, NgModel as Model } from './some.d.js';\nexport * from './other.js';");
-        assert_eq!(out[0].symbols["NgModel"],"Model");
+        assert!(out[0].symbols["NgModel"].contains("Model"));
         assert_eq!(out[0].path.as_deref(),Some("./some.d.js"));
         assert!(out[1].star);
+    }
+    #[test]
+    fn preserves_multiple_public_names_for_one_declaration() {
+        // Angular can expose RouterLink and its deprecated RouterLinkWithHref
+        // alias from the *same* underlying declaration.
+        let reexports = exports(
+            "export { RouterLink, RouterLink as RouterLinkWithHref } from './router_link.d.js';"
+        );
+        let public = &reexports[0].symbols["RouterLink"];
+        assert_eq!(public.len(), 2);
+        assert!(public.contains("RouterLink"));
+        assert!(public.contains("RouterLinkWithHref"));
     }
     #[test]
     fn distinguishes_legacy_routerlink_directives_on_anchor_elements() {

@@ -1,6 +1,6 @@
 id = "arkhtech.angular-template-imports"
 name = "Angular Template Imports"
-version = "0.3.4"
+version = "0.3.5"
 
 description = "Smart Angular Quick Fixes and automatic imports for OpenIDEA"
 
@@ -15,10 +15,12 @@ activation = ["on-language:html"]
 
 
 change-notes = """
-Improved Angular directive and pipe dependency resolution.
-Filtered testing-related packages and test files from new suggestions.
-Inserted TypeScript imports after existing imports.
-Added regression tests for import ordering and filtering.
+Added multiple import options for Angular directives and pipes.
+Added an interactive import selection dialog.
+Improved detection of re-exported symbols and aliases.
+Fixed RouterLink and RouterLinkWithHref resolution.
+Added optional test/testing imports with clear labels.
+Preserved duplicate import prevention and import ordering.
 """
 
 
