@@ -48,10 +48,8 @@ fn installed_entries(project: &Project, name: &str) -> Vec<(String, String)> {
     entries.truncate(100);
     entries
 }
-/// Test-only secondary entrypoints are not valid auto-import suggestions for
-/// application templates. Check complete *subpath segments*, not substring
-/// matches: `@angular/router/testing` is excluded, `@my/testing-tools`
-/// remains a valid package root and `@foo/my-testing-api` stays available.
+/// Used in regression tests only: recognizes complete test subpath segments.
+#[cfg(test)]
 fn test_only_entrypoint(package: &str, module: &str) -> bool {
     let Some(subpath) = module.strip_prefix(package).and_then(|s| s.strip_prefix('/')) else {
         return false;
@@ -64,9 +62,9 @@ pub(crate) fn is_test_dir(part: &str) -> bool {
         | "mocks" | "spec" | "specs" | "fixtures" | "e2e")
 }
 
-/// Ignore local declarations that exist solely for tests. Do not exclude
-/// similarly named production source files such as `testimonials.pipe.ts`.
-pub(crate) fn test_only_source(path: &str) -> bool {
+/// Test classification is informational in this version, not an exclusion.
+#[cfg(test)]
+fn test_only_source(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let mut parts = normalized.split('/').peekable();
     while let Some(part) = parts.next() {
@@ -112,11 +110,40 @@ fn internal_dts(base: &str, spec: &str) -> Option<String> {
     else if !path.ends_with(".d.ts") && !path.ends_with(".d.mts") { path.push_str(".d.ts"); }
     normalize_path(&format!("{}/{}", parent(base), path))
 }
-fn public_local(text: &str, symbol: &str, exports: &[metadata::Export]) -> bool {
-    exports.iter().any(|e| e.path.is_none() && e.symbols.contains_key(symbol))
-        || text.contains(&format!("export declare class {symbol}"))
+type PublicNames = BTreeMap<String, BTreeSet<String>>;
+
+fn local_public_names(text: &str, symbol: &str, exports: &[metadata::Export]) -> BTreeSet<String> {
+    let mut public = BTreeSet::new();
+    if text.contains(&format!("export declare class {symbol}"))
         || text.contains(&format!("export class {symbol}"))
         || text.contains(&format!("export declare abstract class {symbol}"))
+    {
+        public.insert(symbol.to_owned());
+    }
+    for edge in exports.iter().filter(|edge| edge.path.is_none()) {
+        if let Some(aliases) = edge.symbols.get(symbol) {
+            public.extend(aliases.iter().cloned());
+        }
+    }
+    public
+}
+
+// Map the defining name inside a child declaration file to *all* public names
+// exposed by the parent. Never throw away a second alias for the same symbol.
+fn follow_reexport(edge: &metadata::Export, parent: Option<&PublicNames>) -> PublicNames {
+    let mut symbols = PublicNames::new();
+    for (inner, aliases) in &edge.symbols {
+        for alias in aliases {
+            if let Some(allowed) = parent {
+                if let Some(public) = allowed.get(alias) {
+                    symbols.entry(inner.clone()).or_default().extend(public.iter().cloned());
+                }
+            } else {
+                symbols.entry(inner.clone()).or_default().insert(alias.clone());
+            }
+        }
+    }
+    symbols
 }
 
 // A re-export chain carries the public symbol alias down to its defining file.
@@ -124,24 +151,26 @@ fn public_local(text: &str, symbol: &str, exports: &[metadata::Export]) -> bool 
 // decide public visibility. `Some(map)` means the parent explicitly reexported names.
 fn visit(
     project: &Project, package_root: &str, path: &str,
-    module: &str, allowed: Option<BTreeMap<String, String>>,
+    module: &str, allowed: Option<PublicNames>,
     visited: &mut BTreeSet<String>, depth: usize, out: &mut Vec<ExportedDecl>,
 ) {
     if depth > 7 || visited.len() >= 140 || path.contains("../node_modules") { return; }
     let Some(path) = normalize_path(path) else { return; };
     if !path.starts_with(&format!("{package_root}/")) { return; };
-    let key = format!("{path}:{}", allowed.as_ref().map(|x| x.keys().cloned().collect::<Vec<_>>().join(",")).unwrap_or_default());
+    let key = format!("{path}:{allowed:?}");
     if !visited.insert(key) { return; }
     let Ok(src) = project.read_file(&path) else { return; };
     if src.len() > 4_000_000 { return; }
     let exports = metadata::exports(&src);
     for decl in metadata::declarations(&src) {
-        let public = match &allowed {
-            Some(symbols) => symbols.get(&decl.symbol).cloned(),
-            None => public_local(&src, &decl.symbol, &exports).then(|| decl.symbol.clone()),
+        let names = match &allowed {
+            Some(symbols) => symbols.get(&decl.symbol).cloned().unwrap_or_default(),
+            None => local_public_names(&src, &decl.symbol, &exports),
         };
-        if let Some(public_symbol) = public {
-            out.push(ExportedDecl { declaration: decl, public_symbol, module: module.into() });
+        for public_symbol in names {
+            out.push(ExportedDecl {
+                declaration: decl.clone(), public_symbol, module: module.into(),
+            });
         }
     }
     for edge in &exports {
@@ -150,16 +179,7 @@ fn visit(
         let next_allowed = if edge.star {
             allowed.clone()
         } else {
-            let mut symbols = BTreeMap::new();
-            for (inner, alias) in &edge.symbols {
-                if let Some(parent_alias) = allowed.as_ref() {
-                    if let Some(public) = parent_alias.get(alias) {
-                        symbols.insert(inner.clone(), public.clone());
-                    }
-                } else {
-                    symbols.insert(inner.clone(), alias.clone());
-                }
-            }
+            let symbols = follow_reexport(edge, allowed.as_ref());
             if symbols.is_empty() { continue; }
             Some(symbols)
         };
@@ -167,41 +187,14 @@ fn visit(
     }
 }
 
-// An entrypoint can export both `Foo` and `Foo as LegacyFoo`. When both
-// symbols refer to exactly the same Angular declaration, prefer the original
-// exported class for *new* imports. Do not apply this to `scan_modules`:
-// an existing component may legitimately import the legacy alias.
-fn canonical_import_candidates(mut defs: Vec<ExportedDecl>) -> Vec<ExportedDecl> {
-    fn identity(def: &ExportedDecl) -> (String, String, String, u8, bool) {
-        let kind = match def.declaration.kind {
-            Kind::Directive => 0, Kind::Pipe => 1, Kind::Module => 2,
-        };
-        (
-            package_root(&def.module).to_owned(), def.declaration.symbol.clone(),
-            def.declaration.name.clone(), kind, def.declaration.standalone,
-        )
-    }
-    let canonical: BTreeSet<_> = defs.iter()
-        .filter(|def| def.public_symbol == def.declaration.symbol)
-        .map(identity).collect();
-    defs.retain(|def| def.public_symbol == def.declaration.symbol
-        || !canonical.contains(&identity(def)));
-
-    // If a package exports the *same declaration* from its root and from a
-    // secondary entrypoint, choose the root. Do not collapse different
-    // symbols/selectors or different packages, which remain ambiguous.
-    let root_candidates: BTreeSet<_> = defs.iter()
-        .filter(|def| def.module == package_root(&def.module))
-        .map(|def| (def.module.clone(), def.declaration.symbol.clone(), def.declaration.name.clone(), def.declaration.standalone, def.declaration.kind as u8, def.public_symbol.clone()))
-        .collect();
-    defs.retain(|def| {
-        let root = package_root(&def.module);
-        def.module == root || !root_candidates.contains(&(
-            root.to_owned(), def.declaration.symbol.clone(), def.declaration.name.clone(),
-            def.declaration.standalone, def.declaration.kind as u8, def.public_symbol.clone(),
-        ))
-    });
-    defs
+/// Identifies optional testing entrypoints for displaying a non-blocking hint.
+/// Test entrypoints remain visible and selectable as requested.
+pub(crate) fn is_test_origin(module: &str) -> bool {
+    let path = module.replace('\\', "/");
+    path.split('/').any(is_test_dir)
+        || (module.starts_with('.') && path.rsplit('/').next().is_some_and(|name| {
+            name.ends_with(".spec") || name.ends_with(".test")
+        }))
 }
 
 pub fn scan_installed(project: &Project) -> Vec<ExportedDecl> {
@@ -209,14 +202,13 @@ pub fn scan_installed(project: &Project) -> Vec<ExportedDecl> {
     for name in package_names(project) {
         let root = format!("node_modules/{name}");
         for (module, entry) in installed_entries(project, &name) {
-            if test_only_entrypoint(&name, &module) { continue; }
             let path = format!("{root}/{}", entry.trim_start_matches("./"));
             visit(project, &root, &path, &module, None, &mut BTreeSet::new(), 0, &mut out);
         }
     }
     out.sort_by(|a,b| (&a.module,&a.public_symbol).cmp(&(&b.module,&b.public_symbol)));
     out.dedup_by(|a,b| a.module==b.module && a.public_symbol==b.public_symbol && a.declaration.kind==b.declaration.kind);
-    canonical_import_candidates(out)
+    out
 }
 
 /// Resolves only package entrypoints that the Component has *already registered*.
@@ -270,55 +262,18 @@ pub fn exported_module<'a>(all: &'a [ExportedDecl], decl: &ExportedDecl) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn mock_router(module: &str, public_symbol: &str) -> ExportedDecl {
-        ExportedDecl {
-            declaration: Decl {
-                kind: Kind::Directive, symbol: "RouterLink".into(),
-                name: "[routerLink]".into(), standalone: true,
-                exported_symbols: vec![],
-            },
-            public_symbol: public_symbol.into(), module: module.into(),
-        }
+    #[test]
+    fn testing_entrypoints_can_be_labeled_not_silently_removed() {
+        assert!(is_test_origin("@angular/router/testing"));
+        assert!(is_test_origin("ngx-mask/testing/helpers"));
+        assert!(!is_test_origin("@angular/router"));
+        assert!(!is_test_origin("package/testingWidget"));
+        assert!(is_test_origin("../testing/mock.directive"));
+        assert!(is_test_origin("./button.spec"));
+        assert!(!is_test_origin("./testimonials.pipe"));
     }
     #[test]
-    fn prefers_canonical_symbol_over_public_alias_from_same_entrypoint() {
-        let defs = vec![
-            mock_router("@angular/router", "RouterLinkWithHref"),
-            mock_router("@angular/router", "RouterLink"),
-        ];
-        let candidates = canonical_import_candidates(defs);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].public_symbol, "RouterLink");
-    }
-    #[test]
-    fn canonical_alias_across_secondary_entrypoints() {
-        let defs = vec![
-            mock_router("@angular/router/testing", "RouterLinkWithHref"),
-            mock_router("@angular/router", "RouterLink"),
-        ];
-        let candidates = canonical_import_candidates(defs);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].public_symbol, "RouterLink");
-    }
-    #[test]
-    fn prefers_root_entrypoint_for_equivalent_declarations() {
-        let defs = vec![
-            mock_router("@angular/router/testing", "RouterLink"),
-            mock_router("@angular/router", "RouterLink"),
-        ];
-        let candidates = canonical_import_candidates(defs);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].module, "@angular/router");
-    }
-    #[test]
-    fn does_not_choose_between_distinct_directives() {
-        let mut alt = mock_router("other-router", "AlternateLink");
-        alt.declaration.symbol = "AlternateLink".into();
-        let candidates = canonical_import_candidates(vec![mock_router("@angular/router", "RouterLink"), alt]);
-        assert_eq!(candidates.len(), 2);
-    }
-    #[test]
-    fn skips_only_test_secondary_entrypoints() {
+    fn identifies_only_test_secondary_entrypoints() {
         assert!(test_only_entrypoint("@angular/router", "@angular/router/testing"));
         assert!(test_only_entrypoint("@angular/material", "@angular/material/button/testing"));
         assert!(test_only_entrypoint("ngx-mask", "ngx-mask/__tests__/helpers"));
@@ -329,7 +284,7 @@ mod tests {
         assert!(!test_only_entrypoint("pkg", "pkg/testingWidget"));
     }
     #[test]
-    fn skips_test_only_local_declarations() {
+    fn identifies_test_only_local_declarations() {
         assert!(test_only_source("src/app/widgets/button.spec.ts"));
         assert!(test_only_source("src/app/widgets/button.test.ts"));
         assert!(test_only_source("src/app/testing/mock.directive.ts"));
@@ -337,6 +292,42 @@ mod tests {
         assert!(!test_only_source("src/app/testimonials.pipe.ts"));
         assert!(!test_only_source("src/app/mask.directive.ts"));
     }
+    #[test]
+    fn carries_routerlink_aliases_across_reexport_chains() {
+        let top = metadata::exports(
+            "export { RouterLink, RouterLink as RouterLinkWithHref } from './middle.d.js';"
+        );
+        let allowed = follow_reexport(&top[0], None);
+        assert_eq!(allowed["RouterLink"].len(), 2);
+        let middle = metadata::exports(
+            "export { InternalRouterLink as RouterLink } from './router_link.d.js';"
+        );
+        let final_names = follow_reexport(&middle[0], Some(&allowed));
+        assert_eq!(final_names["InternalRouterLink"].len(), 2);
+        assert!(final_names["InternalRouterLink"].contains("RouterLink"));
+        assert!(final_names["InternalRouterLink"].contains("RouterLinkWithHref"));
+    }
+
+    #[test]
+    fn keeps_local_aliases_without_inventing_unexported_symbols() {
+        let source = "declare class RouterLink {} export { RouterLink as RouterLinkWithHref };";
+        let aliases = metadata::exports(source);
+        let names = local_public_names(source, "RouterLink", &aliases);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("RouterLinkWithHref"));
+        assert!(!names.contains("RouterLink"));
+    }
+
+    #[test]
+    fn preserves_both_names_for_directly_exported_class() {
+        let source = "export declare class RouterLink {} export { RouterLink as RouterLinkWithHref };";
+        let aliases = metadata::exports(source);
+        let names = local_public_names(source, "RouterLink", &aliases);
+        assert_eq!(names.len(), 2);
+        assert!(names.contains("RouterLink"));
+        assert!(names.contains("RouterLinkWithHref"));
+    }
+
     #[test]
     fn dts_paths_from_js_reexports() {
         assert_eq!(internal_dts("node_modules/@angular/router/index.d.ts", "./router_module.d-ABC.js"),

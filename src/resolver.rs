@@ -1,6 +1,6 @@
 //! Resolve ownership and candidate directive/pipe imports from real Angular metadata.
 use openidea_plugin::{Error, Project};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::{angular::Dependency, metadata::{self, Kind}, packages, template::Need, typescript};
 
 const MAX_FILES: u32 = 4000;
@@ -69,8 +69,9 @@ fn scan_local(project: &Project, from_ts: &str, major: Option<u32>, needs: &[Nee
     let mut result = Vec::new();
     let Ok(files) = project.find_files("**/*.ts", MAX_FILES) else { return result; };
     for path in files {
-        if path == from_ts || path.ends_with(".d.ts") || path.contains("node_modules/")
-            || packages::test_only_source(&path) { continue; }
+        if path == from_ts || path.ends_with(".d.ts") || path.contains("node_modules/") {
+            continue;
+        }
         let Ok(src) = project.read_file(&path) else { continue; };
         if !src.contains("@Directive") && !src.contains("@Pipe") { continue; }
         let Some(module) = relative_module(from_ts, &path) else { continue; };
@@ -206,38 +207,52 @@ pub fn satisfied_needs(project: &Project, from_ts: &str, source: &str, needs: &[
     satisfied
 }
 
-pub fn dependencies(project: &Project, from_ts: &str, needs: &[Need], strict: bool) -> Result<Vec<Dependency>, Error> {
+/// Returns all valid export locations for each unresolved HTML need. There is
+/// deliberately no canonical-only filtering: testing entrypoints and aliases
+/// are user-visible choices, never silently picked by the plugin.
+pub fn candidate_options(
+    project: &Project, from_ts: &str, needs: &[Need],
+) -> BTreeMap<String, Vec<Dependency>> {
     let major = angular_major(project);
     let mut possibilities = scan_local(project, from_ts, major, needs);
     possibilities.extend(scan_dependencies(project, needs));
-    let mut resolved = Vec::<Dependency>::new();
+    let mut options = BTreeMap::<String, Vec<Dependency>>::new();
     for need in needs {
-        let mut options: Vec<_> = possibilities.iter().filter(|(id, _)| id == &need.id()).map(|(_,dep)|dep.clone()).collect();
-        options.sort_by(|a,b| (&a.module,&a.symbol).cmp(&(&b.module,&b.symbol)));
-        options.dedup_by(|a,b| a.module == b.module && a.symbol == b.symbol);
-        if options.len() == 1 {
-            if !resolved.iter().any(|x| x.module == options[0].module && x.symbol == options[0].symbol) {
-                resolved.push(options.remove(0));
-            }
-        } else if strict {
-            let message = if options.is_empty() { format!("Nenhuma diretiva/pipe exportado encontrado para {}", need.label()) }
-                else {
-                    let details = options.iter().take(6)
-                        .map(|dep| format!("{} de {}", dep.symbol, dep.module))
-                        .collect::<Vec<_>>().join("; ");
-                    format!("Existem {} definicoes possiveis para {}: {}. Nao vou escolher automaticamente.",
-                        options.len(), need.label(), details)
-                };
-            return Err(Error::NotFound(message));
-        }
-        // For an "import all" action, skip unknown/ambiguous candidates safely.
+        let entry = options.entry(need.id()).or_default();
+        entry.extend(possibilities.iter().filter(|(id, _)| id == &need.id())
+            .map(|(_, dep)| dep.clone()));
+        normalize_options(entry);
     }
-    Ok(resolved)
+    options
+}
+
+fn option_rank(dep: &Dependency) -> (bool, bool, usize, &str, &str) {
+    // Prefer production imports without removing test/secondary choices.
+    let test = packages::is_test_origin(&dep.module);
+    let local = dep.module.starts_with('.');
+    (test, !local, dep.module.matches('/').count(), &dep.module, &dep.symbol)
+}
+
+pub fn normalize_options(options: &mut Vec<Dependency>) {
+    options.sort_by(|a, b| option_rank(a).cmp(&option_rank(b)));
+    options.dedup_by(|a, b| a.module == b.module && a.symbol == b.symbol);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_testing_and_non_testing_alternatives() {
+        let mut options = vec![
+            Dependency::new("ɵRouterLink", "@angular/router/testing", None),
+            Dependency::new("RouterLink", "@angular/router", None),
+            Dependency::new("RouterLink", "@angular/router", None),
+        ];
+        normalize_options(&mut options);
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].module, "@angular/router");
+        assert_eq!(options[1].module, "@angular/router/testing");
+    }
     #[test]
     fn normalizes_paths() {
         assert_eq!(resolve_from("/a/src/app/card/card.component.ts", "../card.html"), "/a/src/app/card.html");
